@@ -1,0 +1,1269 @@
+---
+title: "ME1"
+author: "Mico de Lara"
+date: "2026-02-17"
+output: html_document
+---
+
+```{r}
+library(GGally)
+library(ggplot2)
+library(car)
+library(manipulate)
+library(e1071)
+library(mgcv)
+library(boot)
+library(patchwork)
+library(splines)
+library(dplyr)
+library(olsrr)
+library(aod)
+```
+
+
+```{r}
+data <- read.csv("SENIC.csv")
+str(data)
+SENIC_orig <- data[,c("stay","inf","census","nurses")]
+
+#Missing Values  
+sum(!complete.cases(SENIC_orig))
+
+str(SENIC_orig)
+
+summary(SENIC_orig)
+```
+
+#Determine Outliers or potential influential data
+```{r}
+#stay
+Q1 <- quantile(SENIC_orig$stay,0.25)
+Q3 <- quantile(SENIC_orig$stay,0.75)
+IQR_val <- IQR(SENIC_orig$stay)
+
+LB <- Q1- 1.5*IQR_val
+UB <- Q3+ 1.5*IQR_val
+
+SENIC_orig[SENIC_orig$stay < LB | SENIC_orig$stay > UB,]
+```
+
+#Remove Outliers
+```{r}
+
+scatterplotMatrix(SENIC_orig, smooth = F, regLine=T, main="With Outliers")
+
+#stay response variable is positive and skewed to the right
+
+SENIC.no.outliers <- SENIC_orig[-c(47,112),]
+
+scatterplotMatrix(SENIC.no.outliers, smooth = F, regLine=T, main="No Outliers")
+
+summary(SENIC.no.outliers)
+
+```
+#EDA
+#Based on scatter plots:
+#Positive but weak relationship. That is, as the variables inf, census, and nurses increase, the length of stay also increases
+#The distribution of stay, census, and nurses are positive and rightly skewed while inf resembles a bell shaped curve with high peakness. This means that most of the data fall on the smaller values.
+#The estimated PDF of the response variable 'stay' seems to resemble a Gamma or inverse gaussian distribution because of right skewness
+#census and nurses have strong and positive correlation (+0.9)
+
+```{r}
+ggpairs(SENIC_orig, 
+        columns = 1:4,  
+        lower = list(continuous = wrap("points", alpha = 0.5)),
+        upper = list(continuous = wrap("cor", size = 3)),
+       diag = list(continuous = wrap("barDiag"))
+)
+
+ggpairs(SENIC.no.outliers, 
+        columns = 1:4,  
+        lower = list(continuous = wrap("points", alpha = 0.5)),
+        upper = list(continuous = wrap("cor", size = 3)),
+       diag = list(continuous = wrap("barDiag"))
+)
+
+
+par(mfrow= c(1,4))
+boxplot(SENIC_orig$stay, main="stay")
+boxplot(SENIC_orig$inf, main="inf")
+boxplot(SENIC_orig$census, main="census")
+boxplot(SENIC_orig$nurses, main="nurses")
+
+```
+
+
+
+```{r}
+SENIC.plot <- SENIC_orig
+SENIC.plot$id <- rownames(SENIC.plot)
+g1 <- ggplot() +
+  geom_point(data=SENIC.plot, aes(x=inf,y=stay)) +
+  geom_smooth(data=SENIC.plot,aes(x=inf,y=stay,color="With outliers"),method="lm", se=F) +
+  geom_smooth(data=SENIC.no.outliers,aes(x=inf,y=stay,color="No Outliers"),method="lm",se=F) +
+  geom_text(data=subset(SENIC.plot,id %in% c("47","112")), aes(x=inf,y=stay, label=id)) +
+  scale_color_manual(values=c("With outliers"="blue", "No Outliers"="red"))
+
+g2 <- ggplot() +
+  geom_point(data=SENIC.plot, aes(x=census,y=stay)) +
+  geom_smooth(data=SENIC.plot,aes(x=census,y=stay,color="With outliers"),method="lm", se=F) +
+  geom_smooth(data=SENIC.no.outliers,aes(x=census,y=stay,color="No Outliers"),method="lm",se=F) +
+  geom_text(data=subset(SENIC.plot,id %in% c("47","112")), aes(x=census,y=stay, label=id)) +
+  scale_color_manual(values=c("With outliers"="blue", "No Outliers"="red"))
+
+g3 <- ggplot() +
+  geom_point(data=SENIC.plot, aes(x=nurses,y=stay)) +
+  geom_smooth(data=SENIC.plot,aes(x=nurses,y=stay,color="With outliers"),method="lm", se=F) +
+  geom_smooth(data=SENIC.no.outliers,aes(x=nurses,y=stay,color="No Outliers"),method="lm",se=F) +
+  geom_text(data=subset(SENIC.plot,id %in% c("47","112")), aes(x=nurses,y=stay, label=id)) +
+  scale_color_manual(values=c("With outliers"="blue", "No Outliers"="red"))
+
+
+(g1 | g2 | g3) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+```
+
+
+
+#Fit an OLS regression model using all variables
+
+```{r}
+SENIC.lm <- lm(stay ~ inf + census + nurses, data=SENIC_orig)
+summary(SENIC.lm)
+
+#Magnitude of the error (Fox, 2016 p. 307)
+fitted_vals <- fitted(SENIC.lm)
+
+groups <- cut(fitted_vals,
+              breaks = quantile(fitted_vals, probs = seq(0,1,0.25)),
+              include.lowest = TRUE)
+
+sd_by_group <- tapply(resid(SENIC.lm), groups, sd)
+
+sd_by_group
+
+max(sd_by_group, na.rm = TRUE) / min(sd_by_group, na.rm = TRUE)
+```
+#Linear Model Diagnostics: Unusual and Influential Data
+
+#Leverage
+```{r}
+plot(SENIC.lm, which=5)
+```
+
+
+#Detecting Outliers
+```{r}
+#Studentized residuals
+
+ols_plot_resid_stud(SENIC.lm)
+
+#Bonferroni Adjustment
+outlierTest(SENIC.lm) #based on studentized residuals
+```
+
+
+
+#Measuring Influence
+#the observations that have major influence in the regression coefficients are 47 and 112 (Cook's distance)
+#the observations that have major influence in the regression coefficients are 47 and 112 (DFFITS and DFBETAS)
+#the observation that decrease the precision of estimation is 47 (COVRATIO)
+```{r}
+
+#Influence of regression coefficients
+ols_plot_cooksd_chart(SENIC.lm)
+ols_plot_dfbetas(SENIC.lm)
+ols_plot_dffits(SENIC.lm)
+
+#Influence on standard errors
+covr <- covratio(SENIC.lm)
+
+n <- length(covr)
+p <- length(coef(SENIC.lm)) - 1
+threshold <- 3*(p+1)/n
+
+plot(covr,
+     ylab="COVRATIO",
+     main="COVRATIO Plot")
+
+abline(h=1, col="red")
+abline(h=c(1-threshold, 1+threshold),
+       col="blue", lty=2)
+
+inf_points <- which(abs(covr - 1) > threshold)
+
+text(inf_points,
+     covr[inf_points],
+     labels=inf_points,
+     pos=3,
+     col="blue")
+```
+
+#Check whether the assumptions of OLS regression model are satisfied by the data set.Focus on normality and homoskedasticity assumptions.
+
+```{r}
+#Model Diagnostics
+
+#par(mfrow=c(4,1))
+plot(SENIC.lm)
+
+#first graph (Residuals vs Fitted): the errors seem to be scattered uniformly across the fitted values, suggesting homoscedasticity
+
+## Score Test for Non-Constant Error Variance (Breusch-Pagan test)
+#H0: error variance does not change with the level of the response (fitted values)
+#Ha: error variance changes with the level of the response (fitted values), or with a linear combination of predictors)
+#Reject H0; model is heteroscedastic
+ncvTest(SENIC.lm)
+
+crPlots(SENIC.lm)
+ceresPlots(SENIC.lm)
+
+## testing for independence of error terms ----
+durbinWatsonTest(SENIC.lm)
+
+## testing for normality of error terms ----
+shapiro.test(SENIC.lm$residuals)
+
+## other data considerations ----
+### checking for multicollinearity ----
+vif(SENIC.lm)
+sqrt(vif(SENIC.lm)) > 2 # problem?
+
+### identify possible outliers ----
+outlierTest(SENIC.lm) # based on studentized residuals
+
+
+#Without Outliers
+SENIC.lm.no.outliers <- lm(stay ~ inf + census + nurses, data=SENIC.no.outliers)
+plot(SENIC.lm.no.outliers)
+crPlots(SENIC.lm.no.outliers)
+ceresPlots(SENIC.lm.no.outliers)
+
+```
+
+#Use an appropriate GLM to characterize the response variable stay using the variables inf, census, and nurses. Show all steps in refining the model.
+
+```{r}
+
+SENIC <- SENIC_orig
+#consider Gamma first as family distribution, then compare with Inverse Gaussian and Gaussian 
+
+SENIC.glm.gamma0 <- glm(stay ~ 1, data=SENIC, family=Gamma) #intercept only
+SENIC.glm.gamma1 <- glm(stay ~ inf, data=SENIC, family=Gamma)
+SENIC.glm.gamma2 <- glm(stay ~ census, data=SENIC, family=Gamma)
+SENIC.glm.gamma3 <- glm(stay ~ nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma4 <- glm(stay ~ inf + census, data=SENIC, family=Gamma)
+SENIC.glm.gamma5 <- glm(stay ~ inf + nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma6 <- glm(stay ~ census + nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma7 <- glm(stay ~ inf + census + nurses, data=SENIC, family=Gamma)
+
+#anova(SENIC.glm.gamma1,SENIC.glm.gamma2,SENIC.glm.gamma3,SENIC.glm.gamma4,SENIC.glm.gamma5,SENIC.glm.gamma6,SENIC.glm.gamma7)
+
+AIC(SENIC.glm.gamma4)
+AIC(SENIC.glm.gamma5)
+AIC(SENIC.glm.gamma6)
+AIC(SENIC.glm.gamma7)
+
+#consider link=log
+SENIC.glm.gamma8 <- glm(stay ~ inf + census + nurses, data=SENIC, family=Gamma(link=log))
+
+AIC(SENIC.glm.gamma8)
+anova(SENIC.glm.gamma7,SENIC.glm.gamma8)
+
+#use model 7 (link=inverse)
+
+#consider interaction between census and nurse and inf and nurse and comapre with model 7
+
+SENIC.glm.gamma9 <- glm(stay ~ inf + census*nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma10 <- glm(stay ~ inf*nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma11 <- glm(stay ~ census+inf*nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma12 <- glm(stay ~ nurses + inf*census, data=SENIC, family=Gamma)
+SENIC.glm.gamma13 <- glm(stay ~ inf+ census + nurses + census*nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma14 <- glm(stay ~ inf+ census + nurses + inf*nurses, data=SENIC, family=Gamma)
+SENIC.glm.gamma15 <- glm(stay ~ inf+ census + nurses + inf*census, data=SENIC, family=Gamma)
+SENIC.glm.gamma16 <- glm(stay ~ census + nurses + inf*census, data=SENIC, family=Gamma)
+SENIC.glm.gamma17 <- glm(stay ~ inf+census + inf*census, data=SENIC, family=Gamma)
+SENIC.glm.gamma18 <- glm(stay ~ census*nurses, data=SENIC, family=Gamma)
+
+```
+
+
+```{r}
+models <- list(model0=SENIC.glm.gamma0,
+               model1=SENIC.glm.gamma1,
+              model2=SENIC.glm.gamma2,
+              model3=SENIC.glm.gamma3,
+              model4=SENIC.glm.gamma4,
+              model5=SENIC.glm.gamma5,
+              model6=SENIC.glm.gamma6,
+              model7=SENIC.glm.gamma7,
+              model8=SENIC.glm.gamma8,
+              model9=SENIC.glm.gamma9,
+              model10=SENIC.glm.gamma10,
+              model11=SENIC.glm.gamma11,
+              model12=SENIC.glm.gamma12,
+              model13=SENIC.glm.gamma13,
+              model14=SENIC.glm.gamma14,
+              model15=SENIC.glm.gamma15,
+              model16=SENIC.glm.gamma16,
+              model17=SENIC.glm.gamma17,
+              model18=SENIC.glm.gamma18
+              )
+
+Deviance <- matrix(NA, nrow=19, ncol=1)
+
+Deviance[1,1]= models$model0$deviance
+Deviance[2,1]= models$model1$deviance
+Deviance[3,1]= models$model2$deviance
+Deviance[4,1]= models$model3$deviance
+Deviance[5,1]= models$model4$deviance
+Deviance[6,1]= models$model5$deviance
+Deviance[7,1]= models$model6$deviance
+Deviance[8,1]= models$model7$deviance
+Deviance[9,1]= models$model7$deviance
+Deviance[10,1]= models$model7$deviance
+Deviance[11,1]= models$model8$deviance
+Deviance[12,1]= models$model9$deviance
+Deviance[13,1]= models$model10$deviance
+Deviance[14,1]= models$model11$deviance
+Deviance[15,1]= models$model12$deviance
+Deviance[16,1]= models$model13$deviance
+Deviance[17,1]= models$model14$deviance
+Deviance[18,1]= models$model15$deviance
+Deviance[19,1]= models$model16$deviance
+
+Deviance_Difference <- matrix(NA, nrow=19, ncol=1)
+
+Deviance_Difference[1,1] = 0
+Deviance_Difference[2,1] = models$model0$deviance- models$model1$deviance
+Deviance_Difference[3,1] = models$model0$deviance- models$model2$deviance
+Deviance_Difference[4,1] = models$model0$deviance- models$model3$deviance
+Deviance_Difference[5,1] = models$model0$deviance- models$model4$deviance
+Deviance_Difference[6,1] = models$model0$deviance- models$model5$deviance
+Deviance_Difference[7,1] = models$model0$deviance- models$model6$deviance
+Deviance_Difference[8,1] = models$model4$deviance- models$model7$deviance
+Deviance_Difference[9,1] = models$model5$deviance- models$model7$deviance
+Deviance_Difference[10,1] = models$model6$deviance- models$model7$deviance
+Deviance_Difference[11,1] = models$model7$deviance- models$model8$deviance
+Deviance_Difference[12,1] = models$model7$deviance- models$model9$deviance
+Deviance_Difference[13,1] = models$model7$deviance- models$model10$deviance
+Deviance_Difference[14,1] = models$model7$deviance- models$model11$deviance
+Deviance_Difference[15,1] = models$model7$deviance- models$model12$deviance
+Deviance_Difference[16,1] = models$model7$deviance- models$model13$deviance
+Deviance_Difference[17,1] = models$model7$deviance- models$model14$deviance
+Deviance_Difference[18,1] = models$model7$deviance- models$model15$deviance
+Deviance_Difference[19,1] = models$model7$deviance- models$model16$deviance
+
+AIC <- matrix(NA, nrow=19, ncol=1)
+
+AIC[1,1] <- models$model0$aic
+AIC[2,1] <- models$model1$aic
+AIC[3,1] <- models$model2$aic
+AIC[4,1] <- models$model3$aic
+AIC[5,1] <- models$model4$aic
+AIC[6,1] <- models$model5$aic
+AIC[7,1] <- models$model6$aic
+AIC[8,1] <- models$model7$aic
+AIC[9,1] <- models$model7$aic
+AIC[10,1] <- models$model7$aic
+AIC[11,1] <- models$model8$aic
+AIC[12,1] <- models$model9$aic
+AIC[13,1] <- models$model10$aic
+AIC[14,1] <- models$model11$aic
+AIC[15,1] <- models$model12$aic
+AIC[16,1] <- models$model13$aic
+AIC[17,1] <- models$model14$aic
+AIC[18,1] <- models$model15$aic
+AIC[19,1] <- models$model16$aic
+
+
+df <- matrix(NA, nrow=19, ncol=1)
+
+df[1,1] = models$model0$df.residual
+df[2,1] = models$model1$df.residual
+df[3,1] = models$model2$df.residual
+df[4,1] = models$model3$df.residual
+df[5,1] = models$model4$df.residual
+df[6,1] = models$model5$df.residual
+df[7,1] = models$model6$df.residual
+df[8,1] = models$model7$df.residual
+df[9,1] = models$model7$df.residual
+df[10,1] = models$model7$df.residual
+df[11,1] = models$model8$df.residual
+df[12,1] = models$model9$df.residual
+df[13,1] = models$model10$df.residual
+df[14,1] = models$model11$df.residual
+df[15,1] = models$model12$df.residual
+df[16,1] = models$model13$df.residual
+df[17,1] = models$model14$df.residual
+df[18,1] = models$model15$df.residual
+df[19,1] = models$model16$df.residual
+
+df_difference <- matrix(NA, nrow=19, ncol=1)
+df_difference[1,1] = 0
+df_difference[2,1] = df[1,1]-df[2,1]
+df_difference[3,1] = df[1,1]-df[3,1]
+df_difference[4,1] = df[1,1]-df[4,1]
+df_difference[5,1] = df[1,1]-df[5,1]
+df_difference[6,1] = df[1,1]-df[6,1]
+df_difference[7,1] = df[1,1]-df[7,1]
+df_difference[8,1] = df[5,1]-df[8,1]
+df_difference[9,1] = df[6,1]-df[8,1]
+df_difference[10,1] = df[7,1]-df[8,1]
+df_difference[11,1] = df[8,1]-df[11,1]
+df_difference[12,1] = df[8,1]-df[12,1]
+df_difference[13,1] = df[8,1]-df[13,1]
+df_difference[14,1] = df[8,1]-df[14,1]
+df_difference[15,1] = df[8,1]-df[15,1]
+df_difference[16,1] = df[8,1]-df[16,1]
+df_difference[17,1] = df[8,1]-df[17,1]
+df_difference[18,1] = df[8,1]-df[18,1]
+df_difference[19,1] = df[8,1]-df[19,1]
+
+p_value <- pchisq(Deviance_Difference, df_difference, lower.tail = FALSE)
+
+#Update the Summary
+models_summary <- data.frame(
+                Model = c("0", "1", "2", "3", "4", "5", "6", "7", "7", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"),
+                Explanatory_variables = c("None", "inf", "census","nurses","inf + census", "inf + nurses", "census + nurses", "inf + census + nurses", "inf + census + nurses", "inf + census + nurses", "inf + census + nurses", "inf + census*nurses", "inf*nurses", "census+inf*nurses", "nurses + inf*census", "inf+ census + nurses + census*nurses", "inf+ census + nurses + inf*nurses", "inf+ census + nurses + inf*census", "census + nurses + inf*census"),
+                Deviance = Deviance,
+                df= df,
+                AIC = AIC,
+                Models_Compared = c("","(0)-(1)","(0)-(2)","(0)-(3)","(0)-(4)","(0)-(5)","(0)-(6)", "(4)-(7)", "(5)-(7)", "(6)-(7)", "(7)-(8)", "(7)-(9)", "(7)-(10)", "(7)-(11)", "(7)-(12)", "(7)-(13)", "(7)-(14)", "(7)-(15)", "(7)-(16)"),
+                Deviance_Difference=Deviance_Difference,
+                df_difference = df_difference,
+                p_value=p_value
+                )
+
+models_summary[] <- lapply(models_summary, function(x){
+  if(is.numeric(x)) round(x, 4) else x
+})
+
+models_summary
+#View(models_summary)
+```
+
+#Give the value of an appropriate measure to evaluate the performance of this model.
+
+```{r}
+summary_R_IC_GCV <- function(models, cv.model=SENIC){
+  
+  n <- length(models)
+  Adjusted_R <- numeric(n)
+  cv.error <- numeric(n)
+  aic <- numeric(n)
+  bic <- numeric(n)
+  
+  for(i in 1:n){
+  #R^2
+    deviance <- summary(models[[i]])$deviance
+    null_deviance <- summary(models[[i]])$null.deviance
+    Adjusted_R[i] <- 1 - (deviance / null_deviance)
+  
+  #CV MSPE
+    set.seed(100)
+  cv.error[i] = cv.glm(cv.model , models[[i]] ,K=10)$delta[1]
+  
+  #AIC
+  aic[i] = AIC(models[[i]])
+  
+  #BIC
+  bic[i] = BIC(models[[i]])
+  }
+  
+  df <- data.frame(
+    Model = names(models),
+    Rsquared = round(as.numeric(Adjusted_R),4),
+    CV_MSPE = round(cv.error,4),
+    AIC= aic,
+    BIC=bic
+    
+  )
+  return(df)
+}
+
+summary_R_IC_GCV2 <- function(models, cv.model=SENIC){
+  
+  n <- length(models)
+  Adjusted_R <- numeric(n)
+  cv.error <- numeric(n)
+  aic <- numeric(n)
+  bic <- numeric(n)
+  
+  for(i in 1:n){
+  #R^2
+   # r <- pscl::pR2(models[[i]])
+    #Adjusted_R[i] <- r["McFadden"]
+  
+  #CV MSPE
+    set.seed(100)
+  cv.error[i] = cv.glm(cv.model , models[[i]] ,K=10)$delta[1]
+  
+  #AIC
+  aic[i] = AIC(models[[i]])
+  
+  #BIC
+  bic[i] = BIC(models[[i]])
+  }
+  
+  df <- data.frame(
+    Model = names(models),
+    #Rsquared = round(as.numeric(Adjusted_R),4),
+    CV_MSPE = round(cv.error,4),
+    AIC= aic,
+    BIC=bic
+    
+  )
+  return(df)
+}
+
+#consider family=Gaussian
+SENIC.glm.gaussian1 <- glm(stay ~ inf+ census + nurses, data=SENIC, family=gaussian)
+
+SENIC.glm.gaussian2 <- glm(stay ~ census+inf*nurses, data=SENIC, family=gaussian)
+
+SENIC.glm.gaussian3 <- glm(stay ~ nurses+inf*census, data=SENIC, family=gaussian)
+
+#consider family=inverse Gaussian
+SENIC.glm.invgaussian <- glm(stay ~ inf+ census + nurses, data=SENIC, family = inverse.gaussian(link = "1/mu^2"))
+
+SENIC.glm.invgaussian2 <- glm(stay ~ census+inf*nurses, data=SENIC, family = inverse.gaussian(link = "1/mu^2"))
+
+SENIC.glm.invgaussian3 <- glm(stay ~ nurses+inf*census, data=SENIC, family = inverse.gaussian(link = "1/mu^2"))
+
+
+models_0 <- list(
+  'stay ~ inf+ census + nurses [Gamma]' = SENIC.glm.gamma7,
+  'stay ~ census+inf*nurses [Gamma]' = SENIC.glm.gamma11,
+  'stay ~ nurses+inf*census [Gamma]' = SENIC.glm.gamma12,
+  'stay ~ inf+ census + nurses [Inverse Gaussian]' = SENIC.glm.invgaussian,
+  'stay ~ census+inf*nurses [Inverse Gaussian]' = SENIC.glm.invgaussian2,
+  'stay ~ nurses+inf*census [Inverse Gaussian]' = SENIC.glm.invgaussian3,
+  'stay ~ inf+ census + nurses [Gaussian]'= SENIC.glm.gaussian1,
+  'stay ~ census+inf*nurses [Gaussian]'= SENIC.glm.gaussian2,
+  'stay ~ nurses+inf*census [Gaussian]'= SENIC.glm.gaussian3
+)
+
+summary_R_IC_GCV(models_0)
+
+#best model is glm(stay ~ inf+ census + nurses, data=SENIC, family = inverse.gaussian(link = "1/mu^2")) with lowest CV MSPE, AIC and BIC
+```
+
+
+#Stepwise
+```{r}
+full_model <- glm(stay ~ inf + census + nurses,
+                  family = Gamma,
+                  data = train_data)
+
+step_model <- step(full_model, direction = "both")
+
+summary(step_model)
+summary(full_model)
+AIC(full_model)
+AIC(step_model)
+```
+
+
+
+#Evaluate the predictive ability of the model by randomly selecting ∼ 80% of the dataset to be used as training data and the rest of the observations as test data. Output necessary measures.
+
+
+```{r}
+evaluate_models <- function(models, test_data, response_var){
+  
+  bias <- function(y, yhat){
+    mean(yhat - y)
+  }
+  
+  norm_bias <- function(y, yhat){
+    mean(yhat - y) / mean(y)
+  }
+  
+  mspe <- function(y, yhat){
+    mean((yhat - y)^2)
+  }
+  
+  #mspe <- function(y, yhat){
+   # mean(((yhat - y)/y)^2)
+  #}
+  
+  #rmse <- function(y, yhat){
+    #sqrt(mse(y, yhat))
+  #}
+  
+  rmspe <- function(y, yhat){
+    sqrt(mspe(y, yhat))
+  }
+  
+  nrmse <- function(y, yhat){
+    rmse(y, yhat) / (max(y) - min(y))
+  }
+  
+  mae <- function(y, yhat){
+    mean(abs(yhat - y))
+  }
+  
+  mape <- function(y, yhat){
+    mean(abs((yhat - y)/y)) * 100
+  }
+  
+  smape <- function(y, yhat){
+    mean(2 * abs(yhat - y) / (abs(y) + abs(yhat))) * 100
+  }
+  
+  
+  y <- test_data[[response_var]]
+  
+  results <- lapply(names(models), function(name){
+    
+    model <- models[[name]]
+    
+    #Get predictions
+    yhat <- predict(model, newdata = test_data, type = "response")
+    
+    data.frame(
+      Model = name,
+      Bias = bias(y, yhat),
+      Normalized_Bias = norm_bias(y, yhat),
+      #MSE = mse(y, yhat),
+      MSPE = mspe(y, yhat),
+      NRMSE = nrmse(y, yhat),
+      #RMSE = rmse(y, yhat),
+      RMSPE = rmspe(y, yhat),
+      MAE = mae(y, yhat),
+      MAPE = mape(y, yhat),
+      SMAPE = smape(y, yhat)
+    )
+  })
+  
+  final <- do.call(rbind, results)
+final[ , -1] <- round(final[ , -1], 4) #round to 4 decimal places
+final
+}
+```
+
+```{r}
+#80-20 Split
+set.seed(100)
+train_rows <- base::sample(seq_len(nrow(SENIC)),0.8*nrow(SENIC))
+
+train_data <- SENIC[train_rows,]
+test_data <- SENIC[-train_rows,]
+
+#consider family=inverse Gamma
+SENIC.glm.gamma1.train <- glm(stay ~ inf+ census + nurses, data=train_data, family = Gamma)
+
+SENIC.glm.gamma2.train <- glm(stay ~ census+inf*nurses, data=train_data, family = Gamma)
+
+SENIC.glm.gamma3.train <- glm(stay ~ nurses+inf*census, data=train_data, family = Gamma)
+
+#consider family=inverse Gaussian
+SENIC.glm.invgaussian1.train <- glm(stay ~ inf+ census + nurses, data=train_data, family = inverse.gaussian(link = "1/mu^2"))
+
+SENIC.glm.invgaussian2.train <- glm(stay ~ census+inf*nurses, data=train_data, family = inverse.gaussian(link = "1/mu^2"))
+
+SENIC.glm.invgaussian3.train <- glm(stay ~ nurses+inf*census, data=train_data, family = inverse.gaussian(link = "1/mu^2"))
+
+
+models <- list(
+  'stay ~ inf+ census + nurses [Gamma]' = SENIC.glm.gamma1.train,
+  'stay ~ census+inf*nurses [Gamma]' = SENIC.glm.gamma2.train,
+  'stay ~ nurses+inf*census [Gamma]' = SENIC.glm.gamma3.train,
+  'stay ~ inf+ census + nurses [Inverse Gaussian]' = SENIC.glm.invgaussian1.train,
+  'stay ~ census+inf*nurses [Inverse Gaussian]' = SENIC.glm.invgaussian2.train,
+  'stay ~ nurses+inf*census [Inverse Gaussian]' = SENIC.glm.invgaussian3.train
+)
+
+
+evaluate_models(models, test_data, "stay")
+```
+
+#Diagnostics for GLMs
+```{r}
+# Extract diagnostics
+glm_fit <- SENIC.glm.invgaussian
+
+#ANOVA or analysis of Deviance
+anova(glm_fit, test="Chisq")
+
+aod::wald.test(b = coef(glm_fit), Sigma = vcov(glm_fit), Terms = 2:4)
+
+# LRT or chi-square test
+with(glm_fit, null.deviance - deviance)
+with(glm_fit, df.null)
+with(glm_fit, df.residual)
+with(glm_fit, df.null - df.residual)
+with(glm_fit, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+
+# check log likelihood
+logLik(glm_fit)
+pscl::pR2(glm_fit) # also pseudo R2
+
+
+# residuals, stats package
+r.Dev <- residuals(glm_fit, type="working")
+r.Dev <- residuals(glm_fit, type="response")
+r.Dev <- residuals(glm_fit, type="pearson")
+r.Dev <- rstandard(glm_fit, type="pearson")
+r.Dev <- rstudent(glm_fit, type="pred") 
+
+r.Dev <- residuals(glm_fit, type="deviance")
+head(r.Dev)
+summary(glm_fit) # Residual deviance?
+sum(r.Dev^2)
+
+#influence measures
+inf <- influence.measures(glm_fit)
+head(inf$infmat)
+
+s <- which(apply(inf$is.inf, 1, any))
+SENIC[s,]
+inf$infmat[s,]
+
+
+# pseudo R2
+DescTools::PseudoR2(glm_fit)
+PseudoR2(glm_fit,"all")
+rsq::rsq.lr(glm_fit) #CS
+rsq.n(glm_fit) #NK
+rsq.sse(glm_fit) #Efron
+
+rsq.partial(glm_fit,type="sse") # each partial
+
+
+# multicol
+car::vif(glm_fit)
+DescTools::VIF(glm_fit)
+```
+#Influential Data
+#the observations that have major influence in the regression coefficients are 47 (Cook's distance)
+#the observations that have major influence in the regression coefficients are 47(DFFITS and DFBETAS)
+#the observation that decrease the precision of estimation is 47 (COVRATIO)
+```{r}
+#Extract diagnostics
+
+dff <- dffits(glm_fit)
+dfb <- dfbetas(glm_fit)
+covr <- covratio(glm_fit)
+
+n <- length(cook)
+p <- length(coef(glm_fit))
+
+
+
+#3 DFFITS
+cut_dff <- 2*sqrt((p+1)/(n-p-1))
+
+y_min <- min(dff, -cut_dff) * 1.2
+y_max <- max(dff, cut_dff) * 1.2
+
+plot(dff, type="h",
+     main="DFFITS",
+     ylab="DFFITS",
+     ylim=c(y_min, y_max))
+
+
+abline(h=c(-cut_dff, cut_dff), col="red", lty=2)
+
+flag <- which(abs(dff) > cut_dff)
+text(flag, dff[flag], labels=flag)
+
+
+### 4 DFBETAS
+plot(dfb[,2], type="h",
+     main="DFBETAS (inf)",
+     ylab="DFBETAS")
+
+cut_dfb <- 2/sqrt(n)
+abline(h=c(-cut_dfb, cut_dfb), col="red", lty=2)
+
+flag <- which(abs(dfb[,2]) > cut_dfb)
+text(flag, dfb[flag,2], labels=flag)
+
+plot(dfb[,3], type="h",
+     main="DFBETAS (census)",
+     ylab="DFBETAS")
+
+cut_dfb <- 2/sqrt(n)
+abline(h=c(-cut_dfb, cut_dfb), col="red", lty=2)
+
+flag <- which(abs(dfb[,3]) > cut_dfb)
+text(flag, dfb[flag,3], labels=flag)
+
+plot(dfb[,4], type="h",
+     main="DFBETAS (nurses)",
+     ylab="DFBETAS")
+
+cut_dfb <- 2/sqrt(n)
+abline(h=c(-cut_dfb, cut_dfb), col="red", lty=2)
+
+flag <- which(abs(dfb[,4]) > cut_dfb)
+text(flag, dfb[flag,4], labels=flag)
+
+### 5 Covratio
+plot(covr, type="p",
+     main="COVRATIO",
+     ylab="Covratio",
+     ylim=c(min(covr[flag])*0.5,max(covr[flag])*1.2))
+
+cut_cov <- 3*(p+1)/n
+abline(h=c(1-cut_cov, 1+cut_cov), col="red", lty=2)
+
+flag <- which(abs(covr - 1) > cut_cov)
+text(flag, covr[flag], labels=flag, pos=1)
+
+influencePlot(glm_fit, id.method="identify", main="Influence Plot")
+
+```
+```{r}
+ceresPlots(glm_fit)
+```
+
+
+#Model Recalibration
+```{r}
+SENIC.no.outliers <- SENIC_orig[-c(47),]
+
+
+#updated model
+SENIC.glm.invgaussian_updated <- glm(stay ~ inf+ census + nurses, data=SENIC.no.outliers, family = inverse.gaussian(link = "1/mu^2"))
+
+models_00 <- list(
+  'stay ~ inf+ census + nurses [Inverse Gaussian] UPDATED' = SENIC.glm.invgaussian_updated,
+  'stay ~ inf+ census + nurses [Inverse Gaussian]' = SENIC.glm.invgaussian
+  
+)
+
+summary_R_IC_GCV(models_00, cv.model=SENIC.no.outliers)
+
+```
+
+```{r}
+set.seed(100)
+train_rows_updated <- base::sample(seq_len(nrow(SENIC.no.outliers)),0.8*nrow(SENIC.no.outliers))
+
+train_data_updated <- SENIC.no.outliers[train_rows_updated,]
+test_data_updated <- SENIC.no.outliers[-train_rows_updated,]
+
+SENIC.glm.invgaussian_updated.train <- glm(stay ~ inf+ census + nurses, data=train_data_updated, family = inverse.gaussian(link = "1/mu^2"))
+
+models_train <- list(
+  'stay ~ inf+ census + nurses [Inverse Gaussian] UPDATED' = SENIC.glm.invgaussian_updated.train,
+  'stay ~ inf+ census + nurses [Inverse Gaussian]' = SENIC.glm.invgaussian1.train
+  
+)
+
+
+evaluate_models(models_train, test_data_updated, "stay")
+```
+
+
+
+
+#Choose one variable among inf, census, and nurses for which there is strong evidence of a nonlinear relationship with the response. Output the necessary graphs or measures or test results in the determination of the variable.
+
+```{r}
+
+#EDA
+p.1 <- ggplot(SENIC.no.outliers, aes(x=inf,y=stay)) +
+  geom_point() +
+  geom_smooth(method = lm, se=T, color="blue", fill="blue") +
+  geom_smooth(method=loess, se=T,color="red", fill="red")
+
+p.2 <- ggplot(SENIC.no.outliers, aes(x=census,y=stay)) +
+  geom_point() +
+  geom_smooth(method = lm, se=T, fill="blue") +
+  geom_smooth(method=loess, se=T,color="red", fill="red")
+
+p.3 <- ggplot(SENIC.no.outliers, aes(x=nurses,y=stay)) +
+  geom_point() +
+  geom_smooth(method = lm, se=T, fill="blue") +
+  geom_smooth(method=loess, se=T,color="red", fill="red")
+
+p.1|p.2|p.3
+```
+
+
+```{r}
+fit.lm <- gam(stay ~ inf, data=SENIC.no.outliers)
+fit.gam <- gam(stay ~ ns(inf, df=4), data=SENIC.no.outliers)
+
+fit.lm2 <- gam(stay ~ census, data=SENIC.no.outliers)
+fit.gam2 <- gam(stay ~ ns(census, df=4), data=SENIC.no.outliers)
+
+fit.lm3 <- gam(stay ~ nurses, data=SENIC.no.outliers)
+fit.gam3 <- gam(stay ~ ns(nurses, df=4), data=SENIC.no.outliers)
+
+model_list <- list(fit.lm, fit.gam, fit.lm2, fit.gam2, 
+fit.lm3, fit.gam3)
+
+
+summarize_model.fit <- function(model_list){
+  
+  n <- length(model_list)
+  P_value <- numeric(n)
+  
+  for(i in 1:n){
+    
+    if(i %% 2 != 0 && i < n){
+      P_value[i] <- anova(model_list[[i]], model_list[[i+1]], test="F")$'Pr(>F)'[2]
+    } else {
+      P_value[i] <- NA
+    }
+  }
+  
+  data_frame <- data.frame(
+    Model = c("stay ~ inf","stay ~ ns(inf)",
+              "stay ~ census","stay ~ ns(census)",
+              "stay ~ nurses","stay ~ ns(nurses)"),
+    P_value_anova = round(P_value,4)
+  )
+  
+  return(data_frame)
+}
+  
+  
+ summarize_model.fit(model_list)
+```
+
+```{r}
+
+d <- ggplot(SENIC.no.outliers, aes(x=census, y=stay)) + geom_point() + geom_smooth(method="lm", se=T)
+
+
+d + geom_smooth(method="lm", formula= y ~ poly(x,3,raw=T), se=T, color="red")
+
+```
+
+
+#Using the variable in 2a, perform polynomial regression to predict stay. Use crossvalidation to select the optimal degree d for the polynomial.
+
+```{r}
+
+set.seed(218)
+
+cv.error.10=rep(0 ,10)
+
+for (i in 1:10){
+  
+  glm.fit=glm(stay ~ poly(census,i),data=SENIC.no.outliers)
+
+  cv.error.10[i] = cv.glm(SENIC.no.outliers , glm.fit ,K=10)$delta[1]
+
+}
+cv.error.10
+
+plot(y=cv.error.10, x=c(1:10), type="b", xlab="Degree", ylab="CV MSPE", main="Degree vs CV MSPE", ylim=c(0.001*min(cv.error.10), 1.1*max(cv.error.10)))
+text(x=c(1:10), y=cv.error.10, labels=round(cv.error.10,3), pos=3, cex=0.8)
+
+d <- ggplot(SENIC.no.outliers, aes(x=census , y=stay)) + geom_point()
+
+p1 <- d + geom_smooth(method="lm", formula= y ~ poly(x,1, raw="T"),se=T, color="red") + labs(title="degree=1")
+p2 <- d + geom_smooth(method="lm", formula= y ~ poly(x,3, raw="T"),se=T, color="green") + labs(title="degree=3")
+p3 <- d + geom_smooth(method="lm", formula= y ~ poly(x,5, raw="T"),se=T, color="pink") + labs(title="degree=5")
+
+p1+p2+p3
+
+#choose glm.fit=glm(stay ~ poly(census,3),data=SENIC.no.outliers)
+model2b_full <- glm(stay ~ poly(census,5),data=SENIC.no.outliers)
+```
+#Using the variable in 2a, fit a step function to predict stay , and perform cross-validation to choose the optimal number of cuts. Make a plot of the fit obtained.
+
+```{r}
+set.seed(123)
+
+cv.error.10.step_const <- rep(NA, 10)
+
+SENIC2 <- SENIC.no.outliers
+
+for (i in 2:11){
+  
+  #create bins
+  census_cut <- cut(SENIC2$census, breaks = i)
+  
+  #create dummy variables (numeric matrix)
+  X <- model.matrix(~ census_cut, data = data.frame(census_cut))
+  
+  #combine with response
+  data_step <- data.frame(stay = SENIC2$stay, X[, -1])  # remove intercept
+  
+  fit.step <- glm(stay ~ ., data = data_step)
+  
+  cv.error.10.step_const[i-1] <- cv.glm(data_step, fit.step, K = 10)$delta[1]
+}
+
+cv.error.10.step_const
+min(cv.error.10.step_const)
+plot(y=cv.error.10.step_const, x=c(2:11), type="b", xlab="No. of Cuts", ylab="CV MSPE", main="No. of Cuts vs CV MSPE")
+text(x=c(2:11), y=cv.error.10.step_const, labels=round(cv.error.10.step_const,3), pos=3, cex=0.8)
+
+SENIC.no.outliers2 <- SENIC.no.outliers %>%
+  mutate(cut4 = cut(census, 4),
+         cut6 = cut(census, 6),
+         cut9 = cut(census, 9))
+
+SENIC.no.outliers <- SENIC.no.outliers %>%
+  mutate(cut4 = cut(census, 4),
+         cut6 = cut(census, 6),
+         cut9 = cut(census, 9))
+
+d <- ggplot(SENI2, aes(x=census , y=stay)) + geom_point()
+vcut9 <- c(19.2,106,191,277,363,448,534,555,650,792)
+#vcut8 <- c(19.2,106,191,277,363,448,534,555,792)
+
+p1.step <- d + geom_smooth(method="lm", formula= y ~ cut(x,4),se=T, color="red") + labs(title="cuts=4")
+p2.step <- d + geom_smooth(method="lm", formula= y ~ cut(x,6),se=T, color="red") + labs(title="cuts=6")
+p3.step <- d + geom_smooth(method="lm", formula= y ~ cut(x,vcut9),se=T, color="red") + labs(title="cuts=9")
+
+#p3.step
+p1.step + p2.step + p3.step
+
+#choose
+census_cut2 <- cut(SENIC2$census, breaks = 9)
+model2c1_full <- lm(stay ~ census_cut2, data = SENIC.no.outliers)
+```
+
+#piecewise polynomial
+```{r}
+
+cv.error.10.step_poly <- rep(NA, 10)
+SENIC2 <- SENIC.no.outliers
+set.seed(123)
+for (i in 2:11){
+  
+  # Create bins
+  census_cut <- cut(SENIC2$census, breaks = i)
+  
+  # Convert to numeric dummy matrix
+  X_census <- model.matrix(~ census_cut)[, -1]   # remove intercept
+  
+  # Polynomial term
+  X_stay  <- model.matrix(~ poly(census, 5, raw=TRUE), data=SENIC2)[, -1]
+  
+  # Combine everything
+  data_step <- data.frame(
+    stay = SENIC2$stay,
+    X_census,
+    X_stay
+  )
+  
+  fit.step <- glm(stay ~ ., data = data_step)
+  
+  cv.error.10.step_poly[i-1] <- cv.glm(data_step, fit.step, K=10)$delta[1]
+}
+
+cv.error.10.step_poly
+min(cv.error.10.step_poly)
+
+plot(y=cv.error.10.step_poly, x=c(2:11), type="b", xlab="No. of Cuts", ylab="CV MSPE", main="No. of Cuts vs CV MSPE")
+text(x=c(2:11), y=cv.error.10.step_poly, labels=round(cv.error.10.step_poly,3), pos=3, cex=0.8)
+
+d <- ggplot(SENIC2, aes(x=census , y=stay)) + geom_point()
+vcut8 <- c(19.2,106,191,277,363,448,534,555,792)
+p1.step_poly <- d + geom_smooth(method="lm", formula= y ~ cut(x,4)*poly(x,2,raw=T),se=T, color="green") + labs(title="cuts=4")
+p2.step_poly <- d + geom_smooth(method="lm", formula= y ~ cut(x,5)*poly(x,2,raw=T),se=T, color="green") + labs(title="cuts=5")
+p3.step_poly <- d + geom_smooth(method="lm", formula= y ~ cut(x,vcut8)*poly(x,2,raw=T),se=T, color="green") + labs(title="cuts=8")
+
+p1.step_poly+p2.step_poly+p3.step_poly + plot_layout(heights = c(1, 1))
+
+#choose
+census_cut2 <- cut(SENIC2$census, breaks=4)
+model2c2_full <- lm(stay ~ census_cut2*poly(census,5,raw=T), data=SENIC.no.outliers)
+
+```
+
+
+#Using the variable in 2a, fit a regression spline for a range of degrees of freedom, and plot the resulting fits and report the resulting RSS. Describe the results obtained.
+
+#B-spline
+```{r}
+
+set.seed(100)
+
+cv.error.10.spline=rep(0 ,8)
+
+
+for (i in 3:10){
+  
+  glm.fit=glm(stay ~ bs(census,df=i),data=SENIC.no.outliers)
+
+  cv.error.10.spline[i-2] = cv.glm(SENIC.no.outliers , glm.fit ,K=10)$delta[1]
+
+}
+cv.error.10.spline
+
+#MSPE
+plot(y=cv.error.10.spline, x=c(3:10), type="b", xlab="Degrees of Freedom",ylab="CV MSPE", main="Degrees of Freedom vs CV MSPE")
+text(x=c(3:10), y=cv.error.10.spline, labels=round(cv.error.10.spline,3), pos=3, cex=0.8)
+
+#RSS plot
+plot(y=(cv.error.10.spline)*nrow(SENIC.no.outliers), x=c(3:10), type="b", xlab="Degrees of Freedom",ylab="RSS", main="Degrees of Freedom vs CV RSS")
+text(x=c(3:10), y=(cv.error.10.spline)*nrow(SENIC.no.outliers), labels=round(cv.error.10.spline*nrow(SENIC.no.outliers),3), pos=3, cex=0.8)
+
+d <- ggplot(SENIC.no.outliers, aes(x=census, y=stay)) + geom_point()
+
+p1.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=3),se=T, color="red") + labs(title="df=3")
+p2.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=4),se=T, color="red") + labs(title="df=4")
+p3.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=5),se=T, color="red") + labs(title="df=5")
+p4.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=6),se=T, color="red") + labs(title="df=6")
+p5.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=7),se=T, color="red") + labs(title="df=7")
+p6.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=8),se=T, color="red") + labs(title="df=8")
+p7.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=9),se=T, color="red") + labs(title="df=9")
+p8.spline <- d + geom_smooth(method="lm", formula= y ~ bs(x,df=10),se=T, color="red") + labs(title="df=10")
+
+(p1.spline+p2.spline+p3.spline+p4.spline+p5.spline+p6.spline+p7.spline+p8.spline) + plot_layout(heights = c(1, 1))
+
+#choose df=3
+model2d1_full <- glm(stay ~ bs(census,df=6),data=SENIC.no.outliers)
+```
+
+#natural spline
+```{r}
+set.seed(500)
+
+cv.error.10.ns=rep(0 ,10)
+
+for (i in 1:10){
+  
+  glm.fit=glm(stay ~ ns(census,df=i),data=SENIC.no.outliers)
+
+  cv.error.10.ns[i] = cv.glm(SENIC.no.outliers, glm.fit ,K=10)$delta[1]
+
+}
+cv.error.10.ns
+
+#CV MSE plot
+plot(y=cv.error.10.ns, x=c(1:10), type="b", xlab="Degrees of Freedom",ylab="CV MSPE", main="Degrees of Freedom vs CV MSPE")
+text(x=c(1:10), y=cv.error.10.ns, labels=round(cv.error.10.ns,3), pos=3, cex=0.8)
+
+#RSS plot
+plot(y=(cv.error.10.ns)*nrow(SENIC.no.outliers), x=c(1:10), type="b", xlab="Degrees of Freedom",ylab="RSS", main="Degrees of Freedom vs CV RSS")
+text(x=c(1:10), y=(cv.error.10.ns)*nrow(SENIC.no.outliers), labels=round(cv.error.10.ns*nrow(SENIC.no.outliers),3), pos=3, cex=0.8)
+
+d <- ggplot(SENIC.no.outliers, aes(x=census, y=stay)) + geom_point()
+
+p1.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=1),se=T, color="green") + labs(title="df=1")
+p2.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=2),se=T, color="green") + labs(title="df=2")
+p3.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=3),se=T, color="green") + labs(title="df=3")
+p4.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=4),se=T, color="green") + labs(title="df=4")
+p5.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=5),se=T, color="green") + labs(title="df=5")
+p6.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=6),se=T, color="green") + labs(title="df=6")
+p7.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=7),se=T, color="green") + labs(title="df=7")
+p8.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=8),se=T, color="green") + labs(title="df=8")
+p9.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=9),se=T, color="green") + labs(title="df=9")
+p10.ns <- d + geom_smooth(method="lm", formula= y ~ ns(x,df=10),se=T, color="green") + labs(title="df=10")
+
+(p1.ns+p2.ns+p3.ns+p4.ns+p5.ns+p6.ns+p7.ns+p8.ns+p9.ns+p10.ns) + plot_layout(heights = c(1, 1))
+
+#choose df=9
+model2d2_full <- glm(stay ~ ns(census,df=9),data=SENIC.no.outliers)
+
+```
+
+#Determine if using a GAM improved prediction accuracy compared to the linear model by considering the same train and test data set used in Item 1e. For this, choose the best fit among items 2b, 2c, 2d to model the chosen variable in 2a and consider a linear fit for the remaining variables.
+
+
+```{r}
+
+train_data2 <- train_data_updated
+test_data2 <- test_data_updated
+
+#best fit among items 2b, 2c, 2d
+
+#2b
+model.2b=glm(stay ~ poly(census,5),data=train_data2)
+
+#Define breaks from the TRAIN data
+interval  <- 9
+by        <- floor((max(train_data2$census) - min(train_data2$census)) / interval)
+breaks_n  <- seq(from = min(train_data2$census),
+                 to   = max(train_data2$census),
+                 by   = by)
+
+interval2 <- 4
+by2        <- floor((max(train_data2$census) - min(train_data2$census)) / interval2)
+breaks_n2  <- seq(from = min(train_data2$census),
+                 to   = max(train_data2$census),
+                 by   = by2)
+
+# ensure the upper endpoint is included
+if (tail(breaks_n, 1) < max(train_data2$census)){
+  breaks_n <- c(breaks_n, max(train_data2$census))
+}
+
+if (tail(breaks_n2, 1) < max(train_data2$census)){
+  breaks_n2 <- c(breaks_n2, max(train_data2$census))
+}
+
+# 2) Create a factor column in BOTH sets, using the SAME breaks
+train_data2$census_grp <- cut(train_data2$census, breaks=breaks_n, include.lowest=TRUE, right=TRUE)
+test_data2$census_grp  <- cut(test_data2$census,  breaks=breaks_n, include.lowest=TRUE, right=TRUE)
+
+train_data2$census_grp2 <- cut(train_data2$census, breaks=breaks_n2, include.lowest=TRUE, right=TRUE)
+test_data2$census_grp2  <- cut(test_data2$census,  breaks=breaks_n2, include.lowest=TRUE, right=TRUE)
+
+# 3) Fit your “2c” and downstream models using census_grp (no inline cut() in the formula)
+model.2c1 <- lm(stay ~ census_grp, data = train_data2)
+
+
+
+model.2c2 <- lm(stay ~ census_grp2*poly(census, 5, raw = TRUE), data = train_data2)
+
+# 2b and 2d
+model.2d1 <- glm(stay ~ splines::bs(census, df=6), data=train_data2)
+model.2d2 <- glm(stay ~ splines::ns(census, df=9), data=train_data2)
+
+models_2 <- list(
+  'glm(stay ~ poly(census,5))'                       = model.2b,
+  'lm(stay ~ census_grp) [constant step]'                             = model.2c1,
+  'lm(stay ~ census_grp * poly(census,2,raw=TRUE)) [piecewise polynomial]'   = model.2c2,
+  'glm(stay ~ bs(census,df=6))'                       = model.2d1,
+  'glm(stay ~ ns(census,df=9))'                       = model.2d2
+)
+
+
+evaluate_models(models_2, test_data2, "stay")  #the _____ model has the best predictive capability
+
+#Full model
+
+models111 <- list(
+  'glm(stay ~ poly(census,5))'                       = model2b_full,
+  'lm(stay ~ census_grp) [constant step]'           = model2c1_full,
+  'lm(stay ~ census_grp * poly(census,2,raw=TRUE)) [piecewise polynomial]'   = model2c2_full,
+  'glm(stay ~ bs(census,df=6))'                       = model2d1_full,
+  'glm(stay ~ ns(census,df=9))'                       = model2d2_full
+)
+
+df_AIC_BIC <- data.frame(
+  Model= c( 'glm(stay ~ poly(census,5))', 'lm(stay ~ census_grp) [constant step]','lm(stay ~ census_grp * poly(census,4,raw=TRUE)) [piecewise polynomial]', 'glm(stay ~ bs(census,df=6))', 'glm(stay ~ ns(census,df=9))'),
+  AIC=AIC(model2b_full,model2c1_full,model2c2_full,model2d1_full,model2d2_full),
+  BIC=BIC(model2b_full,model2c1_full,model2c2_full,model2d1_full,model2d2_full)
+)
+df_AIC_BIC
+
+library(mgcv)
+model_gam <- mgcv::gam(stay ~ inf + nurses + splines::bs(census, df=3), data = train_data2, family = inverse.gaussian(link = "1/mu^2"))
+
+models_3 <- list(
+  'GAM: stay ~ inf + nurses + bs(census, df=6) [Inverse Gaussian]'                = model_gam,
+  'GLM: stay ~ inf + census + nurses [Inverse Gaussian] UPDATED' = SENIC.glm.invgaussian_updated.train
+)
+
+#Predictive Ability
+evaluate_models(models_3, test_data2, "stay")
+
+#Consider full model
+model_gam_full <- mgcv::gam(stay ~ inf + nurses + splines::bs(census, df=3), data = SENIC.no.outliers, family = inverse.gaussian(link = "1/mu^2"))
+
+models0000 <- list(
+  'GAM: stay ~ inf + nurses + bs(census, df=6) [Inverse Gaussian]'                       = model_gam_full,
+  'GLM: stay ~ inf + census + nurses [Inverse Gaussian] UPDATED'           = SENIC.glm.invgaussian_updated
+)
+
+summary_R_IC_GCV2(models0000, cv.model = SENIC.no.outliers)[,c(1,3:4)]
+
+```
+
